@@ -532,9 +532,29 @@ step_install_prerequisites() {
     # preallocated up to the ceiling; the ceiling only matters under load.
     MEM_KB="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 1048576)"
     CT_MAX=$(( MEM_KB * 1024 / 8 / 320 ))
-    [[ "$CT_MAX" -gt 2000000 ]] && CT_MAX=2000000
+    [[ "$CT_MAX" -gt 4000000 ]] && CT_MAX=4000000
     [[ "$CT_MAX" -lt 262144  ]] && CT_MAX=262144
     CT_BUCKETS=$(( CT_MAX / 4 ))
+
+    # tcp_mem/udp_mem — global page-count ceiling shared by ALL TCP (or ALL
+    # UDP) sockets combined, separate from the per-socket rmem/wmem limits
+    # below. Left at the kernel's own boot-time default this is still a real,
+    # RAM-derived ceiling (not "unlimited") — and with rmem_max/wmem_max
+    # raised to 128MB per socket above, a modest number of concurrent
+    # connections could hit that global default long before any single
+    # socket's own limit. Budgeted the same way as conntrack (1/8 of RAM,
+    # in 4KB pages) rather than set sky-high: UDP has no handshake, so a
+    # flood of packets at an open socket (e.g. a future Hysteria2 listener)
+    # can pile up receive-buffer memory without ever completing a real
+    # connection — an uncapped ceiling turns that into an OOM vector.
+    MEM_PAGES_BUDGET=$(( MEM_KB / 32 ))
+    [[ "$MEM_PAGES_BUDGET" -lt 16384 ]] && MEM_PAGES_BUDGET=16384
+    TCP_MEM_HIGH=$MEM_PAGES_BUDGET
+    TCP_MEM_PRESSURE=$(( TCP_MEM_HIGH * 3 / 4 ))
+    TCP_MEM_LOW=$(( TCP_MEM_HIGH / 2 ))
+    UDP_MEM_HIGH=$MEM_PAGES_BUDGET
+    UDP_MEM_PRESSURE=$(( UDP_MEM_HIGH * 3 / 4 ))
+    UDP_MEM_LOW=$(( UDP_MEM_HIGH / 2 ))
 
     cat > "$SYSCTL_TUNING_FILE" <<EOL
 # System-wide ceiling on open file descriptors. Per-service limits (ulimits
@@ -567,6 +587,8 @@ net.core.wmem_default = 26214400
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 net.core.netdev_max_backlog = 65535
+net.ipv4.tcp_mem = $TCP_MEM_LOW $TCP_MEM_PRESSURE $TCP_MEM_HIGH
+net.ipv4.udp_mem = $UDP_MEM_LOW $UDP_MEM_PRESSURE $UDP_MEM_HIGH
 
 # TCP auto-tuning ceilings/behavior for many long-lived, bursty connections.
 net.ipv4.tcp_rmem = 4096 1048576 134217728
