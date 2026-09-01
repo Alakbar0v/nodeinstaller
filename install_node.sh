@@ -1395,7 +1395,8 @@ step_uninstall_node() {
     echo -e "${COLOR_RED}(sysctl, nofile/nproc limits, systemd overrides) — including the IPv6${COLOR_RESET}"
     echo -e "${COLOR_RED}enable/disable switch from step 4, since it lives in the same sysctl file.${COLOR_RESET}"
     echo -e "${COLOR_RED}UFW rules and ufw-docker are NOT touched (avoids risking an SSH lockout).${COLOR_RESET}"
-    echo -e "${COLOR_RED}Camouflage files in /var/www/html and TLS certificates in /etc/letsencrypt are NOT removed.${COLOR_RESET}"
+    echo -e "${COLOR_RED}Camouflage files in /var/www/html WILL be deleted (a fresh reinstall replaces them anyway).${COLOR_RESET}"
+    echo -e "${COLOR_RED}TLS certificates in /etc/letsencrypt are NOT removed.${COLOR_RESET}"
     echo -e ""
     reading "Type y to confirm removal (y/N):" confirm
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
@@ -1412,6 +1413,9 @@ step_uninstall_node() {
 
     rm -rf "$NODE_DIR"
     echo -e "${COLOR_GREEN}$NODE_DIR removed.${COLOR_RESET}"
+
+    rm -rf /var/www/html
+    echo -e "${COLOR_GREEN}/var/www/html removed.${COLOR_RESET}"
 
     # Host-level tuning from 'Install prerequisites' (step 3) — the
     # counterpart of everything that step writes. SYSCTL_TUNING_FILE also
