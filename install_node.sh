@@ -1092,6 +1092,9 @@ services:
       - SECRET_KEY=$(echo -e "$CERTIFICATE")
     volumes:
       - /dev/shm:/dev/shm:rw
+      - /etc/letsencrypt/live/$NODE_CERT_DOMAIN/fullchain.pem:/etc/nginx/ssl/$NODE_CERT_DOMAIN/fullchain.pem:ro
+      - /etc/letsencrypt/live/$NODE_CERT_DOMAIN/privkey.pem:/etc/nginx/ssl/$NODE_CERT_DOMAIN/privkey.pem:ro
+      - /var/www/html:/var/www/html:ro
 EOL
 
     # Main nginx config (replaces the image's built-in /etc/nginx/nginx.conf).
