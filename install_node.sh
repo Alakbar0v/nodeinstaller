@@ -1165,6 +1165,7 @@ EOL
     cat > default.conf <<EOL
 server_names_hash_bucket_size 64;
 server_tokens off;
+large_client_header_buffers 4 24k;
 
 map \$http_upgrade \$connection_upgrade {
     default upgrade;
