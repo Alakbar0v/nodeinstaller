@@ -1181,7 +1181,7 @@ ssl_session_cache shared:MozSSL:50m;
 ssl_session_tickets off;
 
 server {
-    listen 443 ssl backlog=65535;
+    listen 443 ssl backlog=65535 fastopen=4096;
     server_name $SELFSTEAL_DOMAIN;
     http2 on;
 
@@ -1197,7 +1197,7 @@ server {
 $ws_locations}
 
 server {
-    listen 80 default_server backlog=65535;
+    listen 80 default_server backlog=65535 fastopen=4096;
     server_name _;
     return 301 https://\$host\$request_uri;
 }
