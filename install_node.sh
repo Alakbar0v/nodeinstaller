@@ -100,7 +100,7 @@ add_cron_rule() {
 }
 
 # ---------------------------------------------------------------------------
-# One-time setup: install a short local command (default: rr) that reruns
+# One-time setup: install a short local command (default: rw) that reruns
 # the latest version of this installer via curl, so later runs don't need
 # the full `bash <(curl -Ls ...)` one-liner.
 # ---------------------------------------------------------------------------
@@ -116,12 +116,18 @@ setup_shortcut_command() {
         fi
     fi
 
-    local name="rr"
+    local name="rw"
     while true; do
         if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
             error "Invalid name (letters, digits, '-', '_' only)."
         elif command -v "$name" >/dev/null 2>&1 && ! grep -q "$SCRIPT_URL" "/usr/local/bin/$name" 2>/dev/null; then
             error "'$name' is already used by another command on this system."
+        # command -v only sees PATH binaries, not shell aliases (this script
+        # doesn't source .bashrc) — check root's rc files explicitly so a
+        # name shadowed by an `alias name=...` elsewhere doesn't silently
+        # win over this wrapper in interactive shells.
+        elif grep -qE "^[[:space:]]*alias[[:space:]]+${name}=" /root/.bashrc /root/.bash_aliases /etc/bash.bashrc 2>/dev/null; then
+            error "'$name' is already defined as a shell alias — pick another name."
         else
             break
         fi
