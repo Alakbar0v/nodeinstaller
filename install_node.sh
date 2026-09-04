@@ -875,7 +875,9 @@ EOL
     systemctl restart docker || fatal "Failed to restart docker after applying the nofile override."
 
     # Unattended upgrades
-    echo 'Unattended-Upgrade::Mail "root";' >> /etc/apt/apt.conf.d/50unattended-upgrades
+    if ! grep -Fxq 'Unattended-Upgrade::Mail "root";' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null; then
+        echo 'Unattended-Upgrade::Mail "root";' >> /etc/apt/apt.conf.d/50unattended-upgrades
+    fi
     echo unattended-upgrades unattended-upgrades/enable_auto_updates boolean true | debconf-set-selections
     dpkg-reconfigure -f noninteractive unattended-upgrades && systemctl restart unattended-upgrades || fatal "Failed to configure unattended-upgrades."
 
