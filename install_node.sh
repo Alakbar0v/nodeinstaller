@@ -20,6 +20,8 @@ set -uo pipefail
 NODE_DIR="/opt/remnanode"
 STATE_FILE="$NODE_DIR/.node_installer_state"
 SYSCTL_TUNING_FILE="/etc/sysctl.d/99-remnanode-tuning.conf"
+SCRIPT_URL="https://raw.githubusercontent.com/Alakbar0v/nodeinstaller/refs/heads/main/install_node.sh"
+SHORTCUT_MARKER="/etc/remnanode-installer-shortcut"
 
 COLOR_RESET="\033[0m"
 COLOR_GREEN="\033[1;32m"
@@ -95,6 +97,46 @@ add_cron_rule() {
     if ! crontab -u root -l | grep -Fxq "$logged_rule"; then
         (crontab -u root -l 2>/dev/null; echo "$logged_rule") | crontab -u root -
     fi
+}
+
+# ---------------------------------------------------------------------------
+# One-time setup: install a short local command (default: rr) that reruns
+# the latest version of this installer via curl, so later runs don't need
+# the full `bash <(curl -Ls ...)` one-liner.
+# ---------------------------------------------------------------------------
+
+setup_shortcut_command() {
+    [[ $EUID -ne 0 ]] && return 0
+
+    if [ -f "$SHORTCUT_MARKER" ]; then
+        local existing
+        existing="$(cat "$SHORTCUT_MARKER" 2>/dev/null)"
+        if [ -n "$existing" ] && [ -x "/usr/local/bin/$existing" ] && grep -q "$SCRIPT_URL" "/usr/local/bin/$existing" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    local name="rr"
+    while true; do
+        if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            error "Invalid name (letters, digits, '-', '_' only)."
+        elif command -v "$name" >/dev/null 2>&1 && ! grep -q "$SCRIPT_URL" "/usr/local/bin/$name" 2>/dev/null; then
+            error "'$name' is already used by another command on this system."
+        else
+            break
+        fi
+        reading "Pick a short command name to launch this installer with:" name
+    done
+
+    cat > "/usr/local/bin/$name" <<EOF
+#!/bin/bash
+# Installed by the Remnawave node installer — reruns the latest version via curl.
+exec bash <(curl -Ls $SCRIPT_URL) "\$@"
+EOF
+    chmod +x "/usr/local/bin/$name"
+    echo "$name" > "$SHORTCUT_MARKER"
+
+    echo -e "${COLOR_GREEN}Shortcut installed — from now on just run '${name}' to launch this installer.${COLOR_RESET}"
 }
 
 # ---------------------------------------------------------------------------
@@ -1550,6 +1592,7 @@ show_menu() {
 }
 
 main() {
+    setup_shortcut_command
     while true; do
         show_menu
         reading "Choice:" OPTION
