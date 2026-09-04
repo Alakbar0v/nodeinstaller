@@ -1441,6 +1441,13 @@ step_start_node() {
     # images just pulled, instead of silently reusing an old one.
     docker rm -f nginx remnanode > /dev/null 2>&1
 
+    # Xray binds these unix sockets itself (in /dev/shm, shared with the
+    # nginx container via bind mount) and doesn't clean them up after an
+    # unclean exit — a leftover file makes the next bind fail with
+    # "address already in use". Safe to remove here since both containers
+    # were just stopped above.
+    rm -f /dev/shm/xray*.sock
+
     echo -e "${COLOR_YELLOW}Starting node containers...${COLOR_RESET}"
     docker compose up -d --force-recreate --remove-orphans > /dev/null 2>&1 &
     spinner $! "Starting..."
