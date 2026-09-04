@@ -1542,6 +1542,33 @@ step_uninstall_node() {
 }
 
 # ---------------------------------------------------------------------------
+# Step: Update (system packages + node images)
+# ---------------------------------------------------------------------------
+
+step_update_node() {
+    echo -e "${COLOR_GREEN}== Step: Update (system + node images) ==${COLOR_RESET}"
+    check_root
+
+    step_system_upgrade
+
+    if [ ! -f "$NODE_DIR/docker-compose.yml" ]; then
+        error "Node is not installed yet (no $NODE_DIR/docker-compose.yml) — skipping image update."
+        return 0
+    fi
+
+    echo -e "${COLOR_YELLOW}Pulling latest node images...${COLOR_RESET}"
+    cd "$NODE_DIR" || fatal "Cannot access $NODE_DIR"
+    docker compose pull || fatal "docker compose pull failed."
+
+    echo -e "${COLOR_YELLOW}Recreating containers with the new images...${COLOR_RESET}"
+    docker compose up -d --force-recreate --remove-orphans || fatal "docker compose up failed."
+
+    docker image prune -f > /dev/null 2>&1
+
+    echo -e "${COLOR_GREEN}Node updated and running the latest images.${COLOR_RESET}"
+}
+
+# ---------------------------------------------------------------------------
 # Full installation (English) — runs all steps in order
 # ---------------------------------------------------------------------------
 
@@ -1587,6 +1614,8 @@ show_menu() {
     echo -e ""
     echo -e "${COLOR_RED}10. Uninstall / reinstall node (destructive)${COLOR_RESET}"
     echo -e ""
+    echo -e "${COLOR_YELLOW}11. Update (system packages + node images)${COLOR_RESET}"
+    echo -e ""
     echo -e "${COLOR_YELLOW}0. Exit${COLOR_RESET}"
     echo -e ""
 }
@@ -1607,6 +1636,7 @@ main() {
             8) step_start_node ;;
             9) step_health_check ;;
             10) step_uninstall_node ;;
+            11) step_update_node ;;
             0) echo -e "${COLOR_YELLOW}Bye.${COLOR_RESET}"; exit 0 ;;
             *) error "Invalid choice." ;;
         esac
