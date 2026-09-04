@@ -1028,6 +1028,19 @@ step_setup_certificate() {
         NODE_CERT_DOMAIN="$SELFSTEAL_DOMAIN"
     fi
 
+    # Always (re)point certbot's renewal hooks at our nginx container —
+    # unconditionally, not just when repairing a broken symlink structure —
+    # so a cert reused from a prior run (ours or a different installer, e.g.
+    # one whose hooks target a differently-named container) still gets
+    # correctly reloaded on the next renewal. Mirrors how the upstream
+    # remnawave-reverse-proxy script reapplies this on every run.
+    local hook_live_dir
+    hook_live_dir=$(find /etc/letsencrypt/live -maxdepth 1 -type d -name "${NODE_CERT_DOMAIN}*" 2>/dev/null | sort -V | tail -n 1)
+    if [ -n "$hook_live_dir" ]; then
+        local hook_renewal_conf="/etc/letsencrypt/renewal/$(basename "$hook_live_dir").conf"
+        [ -f "$hook_renewal_conf" ] && configure_certbot_renewal_hooks "$hook_renewal_conf"
+    fi
+
     # Weekly renewal cron. Method 2 (ACME standalone) needs nginx stopped
     # while certbot briefly binds port 80 itself — port 80 stays open in the
     # firewall permanently now (nginx's own HTTP redirect), so only the
