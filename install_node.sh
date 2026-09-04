@@ -1428,11 +1428,25 @@ step_start_node() {
     ufw allow from "$PANEL_IP" to any port 21 > /dev/null 2>&1
     ufw reload > /dev/null 2>&1
 
-    echo -e "${COLOR_YELLOW}Starting node containers...${COLOR_RESET}"
     cd "$NODE_DIR" || fatal "Cannot access $NODE_DIR"
-    docker compose up -d > /dev/null 2>&1 &
+
+    echo -e "${COLOR_YELLOW}Pulling latest node images...${COLOR_RESET}"
+    docker compose pull > /dev/null 2>&1 &
+    spinner $! "Pulling..."
+    wait
+
+    # Belt-and-suspenders: force-remove any container already holding the
+    # fixed nginx/remnanode names (e.g. left running by a stale/killed
+    # previous install) so `up` always creates fresh containers from the
+    # images just pulled, instead of silently reusing an old one.
+    docker rm -f nginx remnanode > /dev/null 2>&1
+
+    echo -e "${COLOR_YELLOW}Starting node containers...${COLOR_RESET}"
+    docker compose up -d --force-recreate --remove-orphans > /dev/null 2>&1 &
     spinner $! "Starting..."
     wait
+
+    docker image prune -f > /dev/null 2>&1
 
     echo -e "${COLOR_GREEN}Node containers started.${COLOR_RESET}"
 }
