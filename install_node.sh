@@ -515,53 +515,14 @@ step_system_upgrade() {
     fi
 }
 
+
 # ---------------------------------------------------------------------------
-# Step 1: Install prerequisites
+# System tuning (kernel/sysctl, NIC, RPS, THP, CPU governor, journald, limits)
+# Pure host optimisation — no Docker/certbot/UFW installation. Called from
+# step_install_prerequisites and also available standalone from the menu.
 # ---------------------------------------------------------------------------
 
-step_install_prerequisites() {
-    echo -e "${COLOR_GREEN}== Step: Install prerequisites ==${COLOR_RESET}"
-    check_root
-    check_os
-
-    echo -e "${COLOR_YELLOW}Installing base packages...${COLOR_RESET}"
-    apt-get update -y || fatal "apt-get update failed."
-    apt-get install -y ca-certificates curl jq ufw wget gnupg unzip nano dialog git \
-        certbot python3-certbot-dns-cloudflare unattended-upgrades locales dnsutils \
-        coreutils grep gawk python3-pip || fatal "Failed to install required packages."
-
-    if ! dpkg -l | grep -q '^ii.*cron '; then
-        apt-get install -y cron || fatal "Failed to install cron."
-    fi
-    systemctl is-active --quiet cron || systemctl start cron || fatal "Failed to start cron."
-    systemctl is-enabled --quiet cron || systemctl enable cron || fatal "Failed to enable cron."
-
-    if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-        echo -e "${COLOR_YELLOW}Installing Docker via get.docker.com...${COLOR_RESET}"
-        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh || fatal "Failed to download Docker installer."
-        sh /tmp/get-docker.sh || fatal "Docker installation failed."
-    fi
-    command -v docker >/dev/null 2>&1 || fatal "Docker is not installed."
-    systemctl is-active --quiet docker || systemctl start docker || fatal "Failed to start Docker."
-    systemctl is-enabled --quiet docker || systemctl enable docker || fatal "Failed to enable Docker."
-    docker info >/dev/null 2>&1 || fatal "Docker is not working correctly."
-
-    # Firewall baseline
-    # Port 80 stays open permanently: nginx's default.conf serves a plain
-    # HTTP -> HTTPS redirect on it for real visitors, not just ACME challenges.
-    # 443/udp: QUIC/HTTP3 and UDP-based inbounds (Hysteria2/TUIC) sharing the
-    # same port number as the TCP TLS listener above.
-    ufw allow 22/tcp comment 'SSH' && ufw allow 80/tcp comment 'HTTP (redirect to HTTPS)' && ufw allow 443/tcp comment 'HTTPS' && ufw allow 443/udp comment 'QUIC/UDP' && ufw --force enable || fatal "Failed to configure UFW."
-
-    # ufw-docker: makes UFW actually filter Docker's published ports (Docker
-    # otherwise inserts its own iptables rules that bypass UFW). Needs both
-    # ufw and docker already present, hence installed here, after both.
-    echo -e "${COLOR_YELLOW}Installing ufw-docker...${COLOR_RESET}"
-    wget -O /usr/local/bin/ufw-docker https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker || fatal "Failed to download ufw-docker."
-    chmod +x /usr/local/bin/ufw-docker
-    ufw-docker install || fatal "ufw-docker install failed."
-    systemctl restart ufw || fatal "Failed to restart ufw after ufw-docker install."
-
+apply_system_tuning() {
     # Network/connection-tracking tuning for a high-throughput proxy node.
     # Load nf_conntrack explicitly rather than relying on ufw-docker having
     # pulled it in as a side effect — makes net.netfilter.nf_conntrack_max
@@ -695,7 +656,9 @@ EOL
     # PPS ceiling that exists before any sysctl tuning above even matters.
     NODE_NIC="$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')"
     if [[ -n "$NODE_NIC" ]]; then
-        if [[ ! -f /usr/local/sbin/remnanode-rps-setup ]]; then
+        # Always rewritten (not guarded by -f) so fixes reach already
+        # configured servers on re-run.
+        if true; then
             cat > /usr/local/sbin/remnanode-rps-setup <<'RPSEOF'
 #!/bin/bash
 set -e
@@ -706,18 +669,50 @@ mask="$(awk -v n="$ncpu" 'BEGIN{
     s=""; while(n>0){ b=(n>=32?32:n); n-=32;
         v=(b>=32?4294967295:(2^b)-1);
         s=(s==""?sprintf("%x",v):sprintf("%x,%s",v,s)); } print (s==""?"0":s) }')"
-echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+# Hardware multiqueue: if the NIC/hypervisor allows more channels than are
+# currently enabled, raise them to min(ncpu, hardware max). Only ever
+# raises, never lowers. No-op (single queue / unsupported) on most VPS.
+if command -v ethtool >/dev/null 2>&1; then
+    hwmax="$(ethtool -l "$NIC" 2>/dev/null | awk '/Pre-set maximums/{m=1;next} /Current hardware/{m=0} m && /^Combined:/{print $2; exit}')"
+    hwcur="$(ethtool -l "$NIC" 2>/dev/null | awk '/Current hardware/{c=1;next} c && /^Combined:/{print $2; exit}')"
+    if [[ "$hwmax" =~ ^[0-9]+$ && "$hwcur" =~ ^[0-9]+$ ]]; then
+        want=$(( ncpu < hwmax ? ncpu : hwmax ))
+        if [ "$want" -gt "$hwcur" ]; then
+            ethtool -L "$NIC" combined "$want" 2>/dev/null \
+                && echo "remnanode-rps: NIC $NIC channels $hwcur -> $want" \
+                || echo "remnanode-rps: WARNING ethtool -L combined $want failed on $NIC" >&2
+        fi
+    fi
+fi
+entries=65536
+# rps_flow_cnt per RX queue = entries / number of RX queues, so the sum
+# never exceeds the global rps_sock_flow_entries (1 queue -> full 65536).
+# Counted after the channel change above, since that creates new queues.
+nrx="$(ls -d /sys/class/net/"$NIC"/queues/rx-* 2>/dev/null | wc -l)"
+[ "$nrx" -lt 1 ] && nrx=1
+flow_cnt=$(( entries / nrx ))
+echo "$entries" > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+# Normalise a cpumask for comparison: drop commas and leading zeros.
+norm() { local v="${1//,/}"; v="${v,,}"; v="${v#"${v%%[!0]*}"}"; echo "${v:-0}"; }
+bad=0
 for q in /sys/class/net/"$NIC"/queues/rx-*; do
-    [ -e "$q/rps_cpus" ] && echo "$mask" > "$q/rps_cpus" 2>/dev/null || true
-    [ -e "$q/rps_flow_cnt" ] && echo 4096 > "$q/rps_flow_cnt" 2>/dev/null || true
+    [ -e "$q/rps_cpus" ] || continue
+    echo "$mask" > "$q/rps_cpus" 2>/dev/null || true
+    [ -e "$q/rps_flow_cnt" ] && { echo "$flow_cnt" > "$q/rps_flow_cnt" 2>/dev/null || true; }
+    if [ "$(norm "$(cat "$q/rps_cpus" 2>/dev/null)")" != "$(norm "$mask")" ]; then
+        echo "remnanode-rps: WARNING rps_cpus not applied on $q (wanted $mask, got $(cat "$q/rps_cpus" 2>/dev/null))" >&2
+        bad=1
+    fi
 done
 for q in /sys/class/net/"$NIC"/queues/tx-*; do
-    [ -e "$q/xps_cpus" ] && echo "$mask" > "$q/xps_cpus" 2>/dev/null || true
+    [ -e "$q/xps_cpus" ] && { echo "$mask" > "$q/xps_cpus" 2>/dev/null || true; }
 done
+[ "$bad" -eq 0 ] && echo "remnanode-rps: OK $NIC rx_queues=$nrx cpus=$ncpu mask=$mask flow_cnt=$flow_cnt"
+exit 0
 RPSEOF
             chmod +x /usr/local/sbin/remnanode-rps-setup
         fi
-        if [[ ! -f /etc/systemd/system/remnanode-rps.service ]]; then
+        if true; then
             cat > /etc/systemd/system/remnanode-rps.service <<'EOF'
 [Unit]
 Description=Remnanode RPS/RFS/XPS tuning
@@ -734,8 +729,15 @@ WantedBy=multi-user.target
 EOF
         fi
         systemctl daemon-reload
-        systemctl enable --now remnanode-rps.service >/dev/null 2>&1 || true
-        echo -e "${COLOR_GREEN}RPS/RFS/XPS enabled on $NODE_NIC ($(nproc) CPUs).${COLOR_RESET}"
+        systemctl enable remnanode-rps.service >/dev/null 2>&1 || true
+        # restart (not just --now): a oneshot with RemainAfterExit stays
+        # "active" and would not re-run the updated setup script on re-run.
+        systemctl restart remnanode-rps.service >/dev/null 2>&1 || true
+        if journalctl -u remnanode-rps.service --since "-30 sec" --no-pager 2>/dev/null | grep -q 'remnanode-rps: WARNING'; then
+            echo -e "${COLOR_YELLOW}RPS/RFS/XPS on $NODE_NIC: some settings were NOT applied — see 'journalctl -u remnanode-rps'.${COLOR_RESET}"
+        else
+            echo -e "${COLOR_GREEN}RPS/RFS/XPS enabled on $NODE_NIC ($(nproc) CPUs).${COLOR_RESET}"
+        fi
     else
         error "Could not detect the default network interface — RPS/RFS/XPS and NIC tuning skipped."
     fi
@@ -878,7 +880,75 @@ LimitNOFILE=1048576
 LimitNPROC=1048576
 EOL
     systemctl daemon-reload || fatal "systemctl daemon-reload failed."
-    systemctl restart docker || fatal "Failed to restart docker after applying the nofile override."
+    # Docker may be absent when this runs standalone (tuning-only menu item).
+    if command -v docker >/dev/null 2>&1; then
+        systemctl restart docker || fatal "Failed to restart docker after applying the nofile override."
+    fi
+}
+
+step_system_tuning() {
+    echo -e "${COLOR_GREEN}== Step: System tuning (kernel, network, limits) ==${COLOR_RESET}"
+    check_root
+    check_os
+
+    # ethtool/irqbalance are installed inside apply_system_tuning, so apt
+    # metadata must be fresh for that install to succeed.
+    apt-get update -y || fatal "apt-get update failed."
+    apply_system_tuning
+
+    echo -e "${COLOR_GREEN}System tuning applied.${COLOR_RESET}"
+    if command -v docker >/dev/null 2>&1 && [ -f "$NODE_DIR/docker-compose.yml" ]; then
+        echo -e "${COLOR_YELLOW}Docker was restarted to pick up new limits — if node containers are not back up, run step 8.${COLOR_RESET}"
+    fi
+}
+# ---------------------------------------------------------------------------
+# Step 1: Install prerequisites
+# ---------------------------------------------------------------------------
+
+step_install_prerequisites() {
+    echo -e "${COLOR_GREEN}== Step: Install prerequisites ==${COLOR_RESET}"
+    check_root
+    check_os
+
+    echo -e "${COLOR_YELLOW}Installing base packages...${COLOR_RESET}"
+    apt-get update -y || fatal "apt-get update failed."
+    apt-get install -y ca-certificates curl jq ufw wget gnupg unzip nano dialog git \
+        certbot python3-certbot-dns-cloudflare unattended-upgrades locales dnsutils \
+        coreutils grep gawk python3-pip || fatal "Failed to install required packages."
+
+    if ! dpkg -l | grep -q '^ii.*cron '; then
+        apt-get install -y cron || fatal "Failed to install cron."
+    fi
+    systemctl is-active --quiet cron || systemctl start cron || fatal "Failed to start cron."
+    systemctl is-enabled --quiet cron || systemctl enable cron || fatal "Failed to enable cron."
+
+    if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+        echo -e "${COLOR_YELLOW}Installing Docker via get.docker.com...${COLOR_RESET}"
+        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh || fatal "Failed to download Docker installer."
+        sh /tmp/get-docker.sh || fatal "Docker installation failed."
+    fi
+    command -v docker >/dev/null 2>&1 || fatal "Docker is not installed."
+    systemctl is-active --quiet docker || systemctl start docker || fatal "Failed to start Docker."
+    systemctl is-enabled --quiet docker || systemctl enable docker || fatal "Failed to enable Docker."
+    docker info >/dev/null 2>&1 || fatal "Docker is not working correctly."
+
+    # Firewall baseline
+    # Port 80 stays open permanently: nginx's default.conf serves a plain
+    # HTTP -> HTTPS redirect on it for real visitors, not just ACME challenges.
+    # 443/udp: QUIC/HTTP3 and UDP-based inbounds (Hysteria2/TUIC) sharing the
+    # same port number as the TCP TLS listener above.
+    ufw allow 22/tcp comment 'SSH' && ufw allow 80/tcp comment 'HTTP (redirect to HTTPS)' && ufw allow 443/tcp comment 'HTTPS' && ufw allow 443/udp comment 'QUIC/UDP' && ufw --force enable || fatal "Failed to configure UFW."
+
+    # ufw-docker: makes UFW actually filter Docker's published ports (Docker
+    # otherwise inserts its own iptables rules that bypass UFW). Needs both
+    # ufw and docker already present, hence installed here, after both.
+    echo -e "${COLOR_YELLOW}Installing ufw-docker...${COLOR_RESET}"
+    wget -O /usr/local/bin/ufw-docker https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker || fatal "Failed to download ufw-docker."
+    chmod +x /usr/local/bin/ufw-docker
+    ufw-docker install || fatal "ufw-docker install failed."
+    systemctl restart ufw || fatal "Failed to restart ufw after ufw-docker install."
+
+    apply_system_tuning
 
     # Unattended upgrades
     if ! grep -Fxq 'Unattended-Upgrade::Mail "root";' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null; then
@@ -1172,7 +1242,6 @@ pid        /run/nginx.pid;
 
 events {
     worker_connections  65535;
-    multi_accept on;
     use epoll;
 }
 
@@ -1248,7 +1317,7 @@ ssl_session_cache shared:MozSSL:50m;
 ssl_session_tickets off;
 
 server {
-    listen 443 ssl backlog=65535 fastopen=4096;
+    listen 443 ssl reuseport backlog=65535 fastopen=4096;
     server_name $SELFSTEAL_DOMAIN;
     http2 on;
 
@@ -1264,7 +1333,7 @@ server {
 $ws_locations}
 
 server {
-    listen 80 default_server backlog=65535 fastopen=4096;
+    listen 80 default_server reuseport backlog=65535 fastopen=4096;
     server_name _;
     return 301 https://\$host\$request_uri;
 }
@@ -1657,6 +1726,7 @@ show_menu() {
     echo -e "${COLOR_RED}10. Uninstall / reinstall node (destructive)${COLOR_RESET}"
     echo -e ""
     echo -e "${COLOR_YELLOW}11. Update (system packages + node images)${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}12. System tuning only (sysctl, NIC/RPS, limits — no Docker/certbot/UFW install)${COLOR_RESET}"
     echo -e ""
     echo -e "${COLOR_YELLOW}0. Exit${COLOR_RESET}"
     echo -e ""
@@ -1679,6 +1749,7 @@ main() {
             9) step_health_check ;;
             10) step_uninstall_node ;;
             11) step_update_node ;;
+            12) step_system_tuning ;;
             0) echo -e "${COLOR_YELLOW}Bye.${COLOR_RESET}"; exit 0 ;;
             *) error "Invalid choice." ;;
         esac
