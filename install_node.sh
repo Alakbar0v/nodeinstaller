@@ -634,11 +634,25 @@ net.ipv4.icmp_ignore_bogus_error_responses = 1
 net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.all.accept_source_route = 0
 EOL
-    sysctl --system > /dev/null 2>&1 || error "Some sysctl settings could not be applied (e.g. nf_conntrack_max needs the nf_conntrack kernel module) — check 'sysctl --system' output manually if needed."
-    if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = "bbr" ]; then
-        echo -e "${COLOR_GREEN}BBR congestion control active.${COLOR_RESET}"
+    # In LXC/Docker/OpenVZ the kernel belongs to the host: /proc/sys is
+    # read-only and modules can't be loaded, so kernel sysctls and BBR must be
+    # configured on the host, not here.
+    VIRT_TYPE="$(systemd-detect-virt 2>/dev/null || true)"
+    case "$VIRT_TYPE" in
+        lxc|lxc-libvirt|openvz|docker|podman|systemd-nspawn) IN_CONTAINER=1 ;;
+        *) IN_CONTAINER=0 ;;
+    esac
+    if [[ "$IN_CONTAINER" -eq 1 ]]; then
+        echo -e "${COLOR_YELLOW}Container detected ($VIRT_TYPE): the kernel is shared with the host, so sysctl/BBR/conntrack settings cannot be applied from inside.${COLOR_RESET}"
+        echo -e "${COLOR_YELLOW}To enable BBR, run on the HOST: modprobe tcp_bbr && sysctl -w net.core.default_qdisc=fq net.ipv4.tcp_congestion_control=bbr${COLOR_RESET}"
+        sysctl --system > /dev/null 2>&1 || true
     else
-        error "BBR did not activate (tcp_congestion_control != bbr) — check 'sysctl -n net.ipv4.tcp_congestion_control' and that the tcp_bbr module is available on this kernel."
+        sysctl --system > /dev/null 2>&1 || error "Some sysctl settings could not be applied (e.g. nf_conntrack_max needs the nf_conntrack kernel module) — check 'sysctl --system' output manually if needed."
+        if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = "bbr" ]; then
+            echo -e "${COLOR_GREEN}BBR congestion control active.${COLOR_RESET}"
+        else
+            error "BBR did not activate (tcp_congestion_control != bbr) — check 'sysctl -n net.ipv4.tcp_congestion_control' and that the tcp_bbr module is available on this kernel."
+        fi
     fi
     echo -e "${COLOR_GREEN}conntrack sized for ~$(( MEM_KB / 1024 ))MB RAM: max=$CT_MAX buckets=$CT_BUCKETS.${COLOR_RESET}"
 
